@@ -117,8 +117,8 @@ with st.sidebar:
     st.markdown("---")
 
     st.header("🏆 Best Performance")
-    st.metric("LSTM Precision@5",     "30.61%", "Best model")
-    st.metric("Ensemble Precision@5", "29.28%", "Nearly identical")
+    st.metric("LSTM Precision@5",     "29.57%", "Best model")
+    st.metric("Ensemble Precision@5", "29.25%", "Nearly identical")
 
 # ═══════════════════════════════════════════════════════════════════
 # MAIN CONTENT - RECOMMENDATION SECTION
@@ -241,7 +241,7 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric(
         label="LSTM",
-        value="30.61%",
+        value="29.57%",
         delta="Best Model",
         help="Precision@5 - LSTM captures temporal patterns"
     )
@@ -249,34 +249,34 @@ with col1:
 with col2:
     st.metric(
         label="Ensemble",
-        value="29.28%",
-        delta="-1.33%",
+        value="29.25%",
+        delta="-0.32%",
         help="Precision@5 - Weighted average AE+NCF+LSTM"
     )
 
 with col3:
     st.metric(
-        label="AutoEncoder",
-        value="6.26%",
-        delta="+3.55% improved",
-        help="Precision@5 - Improved: bottleneck 256D, pos_weight=15"
+        label="NCF",
+        value="8.81%",
+        delta="+4.97% improved",
+        help="Precision@5 - User-from-Items cold-start inference"
     )
 
 with col4:
     st.metric(
-        label="NCF",
-        value="3.84%",
-        delta="Cold-start users",
-        help="Precision@5 - Neural Collaborative Filtering"
+        label="AutoEncoder",
+        value="3.06%",
+        delta="Sparse data",
+        help="Precision@5 - Denoising AutoEncoder"
     )
 
 # Performance chart
 st.markdown("**Precision@5 Comparison**")
 performance_data = {
-    "LSTM":        30.61,
-    "Ensemble":    29.28,
-    "AutoEncoder":  6.26,
-    "NCF":          3.84,
+    "LSTM":        29.57,
+    "Ensemble":    29.25,
+    "NCF":          8.81,
+    "AutoEncoder":  3.06,
 }
 
 col1, col2 = st.columns([2, 1])
@@ -292,9 +292,9 @@ with col2:
     st.write("**Metrics Legend:**")
     st.info("""
     - **Precision@5**: Out of top 5 recommendations, how many match customer interest
-    - **Higher is better**: 30% means 3 out of 10 recommendations match
+    - **Higher is better**: 29% means 3 out of 10 recommendations match
     - **Random baseline**: ~0.14% (guessing)
-    - **Your system**: 30.61% (220x better!)
+    - **Your system**: 29.57% (211x better!)
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -353,14 +353,14 @@ with st.expander("📈 Evaluation Metrics"):
     **Latest results on 869 test users (20% split):**
     | Model | Precision@5 | Recall@5 | NDCG@5 |
     |---|---|---|---|
-    | LSTM | **30.61%** | 6.31% | **33.08%** |
-    | Ensemble | 29.28% | 5.77% | 32.23% |
-    | AutoEncoder | 6.26% | 0.83% | 6.49% |
-    | NCF | 3.84% | 0.48% | 3.39% |
+    | LSTM | **29.57%** | 5.95% | **31.71%** |
+    | Ensemble | 29.25% | 5.69% | 31.68% |
+    | NCF | 8.81% | 1.21% | 10.08% |
+    | AutoEncoder | 3.06% | 0.49% | 3.49% |
 
     **Comparison to baselines:**
     - Random guessing: ~0.14% precision
-    - Your system (LSTM): 30.61% precision (**220x better!**)
+    - Your system (LSTM): 29.57% precision (**211x better!**)
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -383,7 +383,7 @@ with col2:
     st.markdown("""
     **🚀 Performance**
     - Response time: ~150ms
-    - Accuracy: 30.61% (LSTM)
+    - Accuracy: 29.57% (LSTM)
     - Test users evaluated: 869
     """)
 
