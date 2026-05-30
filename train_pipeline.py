@@ -1,11 +1,18 @@
 """
-Full Training Pipeline.
-Runs preprocessing → Apriori → AutoEncoder → NCF → LSTM → Evaluation.
+train_pipeline.py — Pipeline d'entraînement complet.
+Exécute dans l'ordre : Prétraitement → Apriori → AutoEncodeur → NCF → LSTM → Évaluation.
+
+Découpage des données (70 / 10 / 20) :
+  - Train  (70 %) : entraînement de l'AutoEncodeur
+  - Val    (10 %) : validation de l'AutoEncodeur (arrêt anticipé)
+  - Test   (20 %) : ~869 utilisateurs évalués (vs 434 avec l'ancien découpage 80/10/10)
+  NCF et LSTM sont entraînés sur Train + Val (80 %) pour disposer d'un modèle plus riche.
 """
-import sys
 import os
 import warnings
+import pickle
 
+# Supprime les avertissements de dépréciation pour un affichage plus propre
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 _orig_showwarning = warnings.showwarning
@@ -15,13 +22,16 @@ def _showwarning(msg, cat, fname, lineno, *args, **kwargs):
     _orig_showwarning(msg, cat, fname, lineno, *args, **kwargs)
 warnings.showwarning = _showwarning
 
+# Supprime les logs C++ verbeux de TensorFlow
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import numpy as np
 import tensorflow as tf
-from config import SEED, ENSEMBLE_WEIGHT_AE, ENSEMBLE_WEIGHT_NCF, ENSEMBLE_WEIGHT_LSTM
+from config import (SEED, TRAIN_RATIO, VAL_RATIO,
+                    ENSEMBLE_WEIGHT_AE, ENSEMBLE_WEIGHT_NCF, ENSEMBLE_WEIGHT_LSTM,
+                    POPULAR_PATH)
 
-# Set all seeds
+# Fixe toutes les graines pour la reproductibilité
 np.random.seed(SEED)
 tf.random.set_seed(SEED)
 import random
@@ -30,174 +40,223 @@ random.seed(SEED)
 
 def main():
     print("=" * 60)
-    print("AI RECOMMENDATION MODULE - FULL PIPELINE")
+    print("MODULE DE RECOMMANDATION IA - PIPELINE COMPLET")
     print("=" * 60)
 
-    # 1. Preprocessing
-    print("\n[1/6] PREPROCESSING")
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 1 : PRÉTRAITEMENT
+    # Charge le fichier Excel, nettoie les données et construit
+    # la matrice client-article, les paniers et les séquences.
+    # ─────────────────────────────────────────────────────────────
+    print("\n[1/6] PRÉTRAITEMENT")
     print("-" * 40)
     from preprocessing import run_preprocessing
     df, customer_item_matrix, basket_matrix, sequences, mappings = run_preprocessing()
 
-    # 2. Association Rules
-    print("\n[2/6] ASSOCIATION RULES (APRIORI)")
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 2 : RÈGLES D'ASSOCIATION (APRIORI)
+    # Génère les règles du type "A → B" et les sauvegarde en CSV.
+    # ─────────────────────────────────────────────────────────────
+    print("\n[2/6] RÈGLES D'ASSOCIATION (APRIORI)")
     print("-" * 40)
     from apriori_rules import run_apriori
-    rules = run_apriori(basket_matrix)
+    run_apriori(basket_matrix)
 
-    # 3. Data Split
-    print("\n[3/6] DATA SPLIT")
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 3 : DÉCOUPAGE DES DONNÉES (70 / 10 / 20)
+    # Mélange aléatoire des utilisateurs puis découpage en trois groupes.
+    # ─────────────────────────────────────────────────────────────
+    print("\n[3/6] DÉCOUPAGE DES DONNÉES")
     print("-" * 40)
     all_users = list(customer_item_matrix.index)
-    np.random.shuffle(all_users)
+    np.random.shuffle(all_users)  # Mélange aléatoire reproductible (graine = SEED)
 
-    n = len(all_users)
-    n_train = int(n * 0.8)
-    n_val = int(n * 0.1)
+    n       = len(all_users)
+    n_train = int(n * TRAIN_RATIO)   # 70 % → entraînement AE
+    n_val   = int(n * VAL_RATIO)     # 10 % → validation AE
 
-    train_users = all_users[:n_train]
-    val_users = all_users[n_train:n_train + n_val]
-    test_users = all_users[n_train + n_val:]
-    print(f"  Train: {len(train_users)}, Val: {len(val_users)}, Test: {len(test_users)}")
+    train_users = all_users[:n_train]           # Utilisateurs d'entraînement (AE)
+    val_users   = all_users[n_train:n_train + n_val]  # Utilisateurs de validation (AE)
+    test_users  = all_users[n_train + n_val:]   # Utilisateurs de test (évaluation finale)
+    print(f"  Train : {len(train_users)}, Val : {len(val_users)}, Test : {len(test_users)}")
 
-    # Build train/val/test matrices for AutoEncoder
+    # ── Matrices pour l'AutoEncodeur ──────────────────────────────
+    # L'AE prend en entrée des vecteurs binaires de taille n_items
     matrix_values = customer_item_matrix.values.astype(np.float32)
-    user_idx_map = {u: i for i, u in enumerate(customer_item_matrix.index)}
+    user_idx_map  = {u: i for i, u in enumerate(customer_item_matrix.index)}
 
+    # Indices des lignes de la matrice correspondant aux utilisateurs train/val
     train_indices = [user_idx_map[u] for u in train_users if u in user_idx_map]
-    val_indices = [user_idx_map[u] for u in val_users if u in user_idx_map]
-    test_indices = [user_idx_map[u] for u in test_users if u in user_idx_map]
+    val_indices   = [user_idx_map[u] for u in val_users   if u in user_idx_map]
 
-    train_matrix = matrix_values[train_indices]
-    val_matrix = matrix_values[val_indices]
+    train_matrix = matrix_values[train_indices]  # Matrice d'entraînement AE
+    val_matrix   = matrix_values[val_indices]    # Matrice de validation AE
 
-    # 4. Train AutoEncoder
-    print("\n[4/6] AUTOENCODER TRAINING")
+    # NCF et LSTM entraînés sur train + val (80 %) pour un modèle plus riche
+    # Cela améliore la qualité des embeddings NCF et des séquences LSTM
+    ncf_lstm_users = train_users + val_users
+
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 4 : ENTRAÎNEMENT DE L'AUTOENCODEUR
+    # L'AE apprend à reconstruire les vecteurs d'achats des utilisateurs.
+    # ─────────────────────────────────────────────────────────────
+    print("\n[4/6] ENTRAÎNEMENT AUTOENCODEUR")
     print("-" * 40)
     from model_autoencoder import train_autoencoder
-    ae_model, ae_history = train_autoencoder(train_matrix, val_matrix, mappings['n_items'])
+    ae_model, _ = train_autoencoder(train_matrix, val_matrix, mappings['n_items'])
 
-    # 5. Train NCF
-    print("\n[5/6] NCF TRAINING")
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 5 : ENTRAÎNEMENT DU NCF
+    # Le NCF apprend les interactions utilisateur-article via embeddings.
+    # Entraîné sur 80 % des utilisateurs pour couvrir un maximum d'embeddings.
+    # ─────────────────────────────────────────────────────────────
+    print("\n[5/6] ENTRAÎNEMENT NCF")
     print("-" * 40)
     from model_ncf import train_ncf
-    ncf_model, ncf_history = train_ncf(customer_item_matrix, mappings, train_users)
+    ncf_model, _ = train_ncf(customer_item_matrix, mappings, ncf_lstm_users)
 
-    # 6. Train LSTM
-    print("\n[6/6] LSTM TRAINING")
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 6 : ENTRAÎNEMENT DU LSTM
+    # Le LSTM apprend à prédire le prochain article dans une séquence d'achats.
+    # Entraîné sur 80 % des utilisateurs (train + val).
+    # ─────────────────────────────────────────────────────────────
+    print("\n[6/6] ENTRAÎNEMENT LSTM")
     print("-" * 40)
     from model_lstm import train_lstm
-    lstm_model, lstm_history = train_lstm(sequences, mappings, train_users)
+    lstm_model, _ = train_lstm(sequences, mappings, ncf_lstm_users)
 
-    # 7. Evaluation
+    # ─────────────────────────────────────────────────────────────
+    # ÉTAPE 7 : ÉVALUATION
+    # Évalue les 4 modèles sur les 20 % d'utilisateurs de test.
+    # Protocole cold-start : les utilisateurs de test n'ont pas été vus
+    # pendant l'entraînement de l'AE (train_cim ne contient que train_users).
+    # ─────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("EVALUATION")
+    print("ÉVALUATION")
     print("=" * 60)
     from evaluate import evaluate_model, build_comparison_table, plot_comparison
     from inference import RecommendationEngine
 
+    # Instancie le moteur et charge les modèles fraîchement entraînés
     engine = RecommendationEngine()
-    engine.ae_model = ae_model
-    engine.ncf_model = ncf_model
-    engine.lstm_model = lstm_model
-    engine.mappings = mappings
+    engine.ae_model        = ae_model
+    engine.ncf_model       = ncf_model
+    engine.lstm_model      = lstm_model
+    engine.mappings        = mappings
     engine.customer_vectors = customer_item_matrix
 
-    # Build train matrix for filtering
+    # Charge les articles populaires (fallback cold-start dans recommend())
+    with open(POPULAR_PATH, 'rb') as f:
+        engine.popular_items = pickle.load(f)
+
+    # Matrice d'entraînement pour l'évaluation :
+    # Les utilisateurs de test n'y sont pas → train_items = {} → relevant = tous leurs achats
+    # C'est l'évaluation cold-start standard.
     train_cim = customer_item_matrix.loc[customer_item_matrix.index.isin(train_users)]
 
-    all_results = {}
-
-    # Evaluate AutoEncoder
-    def ae_score_fn(uid):
-        vec = engine._get_user_vector(uid)
-        scores = engine._ae_scores(vec)
-        return {mappings['idx2item'][i]: float(scores[i]) for i in range(mappings['n_items'])}
-
-    ae_results = evaluate_model('AutoEncoder', ae_score_fn, test_users,
-                                customer_item_matrix, train_cim, mappings)
-    all_results['AutoEncoder'] = ae_results
-
-    # Evaluate NCF
-    def ncf_score_fn(uid):
-        scores = engine._ncf_scores(uid)
-        return {mappings['idx2item'][i]: float(scores[i]) for i in range(mappings['n_items'])}
-
-    ncf_results = evaluate_model('NCF', ncf_score_fn, test_users,
-                                  customer_item_matrix, train_cim, mappings)
-    all_results['NCF'] = ncf_results
-
-    # Evaluate LSTM
-    def lstm_score_fn(uid):
-        if uid not in customer_item_matrix.index:
-            return {mappings['idx2item'][i]: 0.0 for i in range(mappings['n_items'])}
-        items = df[df['CustomerID'] == uid].sort_values('InvoiceDate')['StockCode'].tolist()
-        scores = engine._lstm_scores(items)
-        return {mappings['idx2item'][i]: float(scores[i]) for i in range(mappings['n_items'])}
-
-    lstm_results = evaluate_model('LSTM', lstm_score_fn, test_users,
-                                   customer_item_matrix, train_cim, mappings)
-    all_results['LSTM'] = lstm_results
-
     def _normalize(sc):
+        """Normalise un vecteur de scores dans [0, 1] par min-max scaling."""
         mn, mx = sc.min(), sc.max()
         return (sc - mn) / (mx - mn) if mx - mn > 1e-8 else sc
 
-    # Evaluate Ensemble — weighted by known model quality: LSTM > NCF >> AE
+    # ── Fonctions de scoring pour chaque modèle ──────────────────
+    # Chaque fonction retourne un dict {article: score} pour tous les articles.
+
+    def ae_score_fn(uid):
+        """Score AE : reconstruit le vecteur d'achats et retourne les scores."""
+        vec    = engine._get_user_vector(uid)
+        scores = engine._ae_scores(vec)
+        return {mappings['idx2item'][i]: float(scores[i]) for i in range(mappings['n_items'])}
+
+    def ncf_score_fn(uid):
+        """Score NCF : utilise l'embedding entraîné de l'utilisateur."""
+        scores = engine._ncf_scores(uid)
+        return {mappings['idx2item'][i]: float(scores[i]) for i in range(mappings['n_items'])}
+
+    def lstm_score_fn(uid):
+        """Score LSTM : prédit le prochain article à partir de l'historique complet."""
+        items  = df[df['CustomerID'] == uid].sort_values('InvoiceDate')['StockCode'].tolist()
+        scores = engine._lstm_scores(items)
+        return {mappings['idx2item'][i]: float(scores[i]) for i in range(mappings['n_items'])}
+
     def ensemble_score_fn(uid):
-        items = df[df['CustomerID'] == uid].sort_values('InvoiceDate')['StockCode'].tolist()
-        vec = engine._get_user_vector(uid)
+        """Score ensemble : moyenne pondérée normalisée des trois modèles."""
+        items   = df[df['CustomerID'] == uid].sort_values('InvoiceDate')['StockCode'].tolist()
+        vec     = engine._get_user_vector(uid)
         n_items = mappings['n_items']
 
         scores = np.zeros(n_items, dtype=np.float32)
-        w_sum = 0.0
+        w_sum  = 0.0
 
+        # Contribution de l'AutoEncodeur
         ae_sc = engine._ae_scores(vec)
         if np.any(ae_sc > 0):
             scores += ENSEMBLE_WEIGHT_AE * _normalize(ae_sc)
-            w_sum += ENSEMBLE_WEIGHT_AE
+            w_sum  += ENSEMBLE_WEIGHT_AE
 
+        # Contribution du NCF
         ncf_sc = engine._ncf_scores(uid)
         if np.any(ncf_sc > 0):
             scores += ENSEMBLE_WEIGHT_NCF * _normalize(ncf_sc)
-            w_sum += ENSEMBLE_WEIGHT_NCF
+            w_sum  += ENSEMBLE_WEIGHT_NCF
 
+        # Contribution du LSTM
         lstm_sc = engine._lstm_scores(items)
         if np.any(lstm_sc > 0):
             scores += ENSEMBLE_WEIGHT_LSTM * _normalize(lstm_sc)
-            w_sum += ENSEMBLE_WEIGHT_LSTM
+            w_sum  += ENSEMBLE_WEIGHT_LSTM
 
+        # Renormalise si certains modèles sont inactifs
         if w_sum > 0:
             scores /= w_sum
 
         return {mappings['idx2item'][i]: float(scores[i]) for i in range(n_items)}
 
-    ens_results = evaluate_model('Ensemble', ensemble_score_fn, test_users,
+    # ── Lancement de l'évaluation pour chaque modèle ─────────────
+    all_results = {}
+
+    ae_results = evaluate_model('AutoEncoder', ae_score_fn, test_users,
+                                customer_item_matrix, train_cim, mappings)
+    all_results['AutoEncoder'] = ae_results
+
+    ncf_results = evaluate_model('NCF', ncf_score_fn, test_users,
+                                 customer_item_matrix, train_cim, mappings)
+    all_results['NCF'] = ncf_results
+
+    lstm_results = evaluate_model('LSTM', lstm_score_fn, test_users,
                                   customer_item_matrix, train_cim, mappings)
+    all_results['LSTM'] = lstm_results
+
+    ens_results = evaluate_model('Ensemble', ensemble_score_fn, test_users,
+                                 customer_item_matrix, train_cim, mappings)
     all_results['Ensemble'] = ens_results
 
-    # Comparison table and plots
-    table = build_comparison_table(all_results)
+    # Sauvegarde du tableau comparatif et du graphique
+    build_comparison_table(all_results)
     plot_comparison(all_results)
 
-    # Sample predictions
+    # ─────────────────────────────────────────────────────────────
+    # EXEMPLES DE RECOMMANDATIONS
+    # Affiche les recommandations pour 3 utilisateurs de test.
+    # ─────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("SAMPLE PREDICTIONS")
+    print("EXEMPLES DE RECOMMANDATIONS")
     print("=" * 60)
-    sample_users = test_users[:3]
-    for uid in sample_users:
+    for uid in test_users[:3]:
+        # Récupère les 5 derniers articles achetés comme contexte d'entrée
         items = df[df['CustomerID'] == uid].sort_values('InvoiceDate')['StockCode'].tolist()[:5]
         recs, strategy = engine.recommend(uid, items, top_n=5)
-        print(f"\nUser: {uid}")
-        print(f"  Input items: {items}")
-        print(f"  Strategy: {strategy}")
+        print(f"\nUtilisateur : {uid}")
+        print(f"  Articles achetés : {items}")
+        print(f"  Stratégie : {strategy}")
         for r in recs:
-            print(f"    → {r['product_id']}: {r['description']} (score: {r['score']})")
+            print(f"  -> {r['product_id']}: {r['description']} (score: {r['score']})")
 
     print("\n" + "=" * 60)
-    print("PIPELINE COMPLETE")
+    print("PIPELINE TERMINÉ")
     print("=" * 60)
 
 
+# ─── Point d'entrée ──────────────────────────────────────────────────────────
 if __name__ == '__main__':
     main()
