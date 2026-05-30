@@ -561,37 +561,36 @@ with col_bars:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with col_table:
-    st.markdown('<div class="perf-section">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">📋 Tableau complet des métriques</div>', unsafe_allow_html=True)
+    st.markdown("#### 📋 Tableau complet des métriques")
 
     csv_path = os.path.join(SAVED_MODELS_DIR, 'evaluation_results.csv')
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
-        best_p = df.groupby('Model')['Precision@K'].max()
-        html = """
-        <table class="styled-table">
-          <thead><tr>
-            <th>Modèle</th><th>K</th>
-            <th>Précision</th><th>Rappel</th><th>NDCG</th>
-          </tr></thead><tbody>
-        """
-        for _, row in df.iterrows():
-            is_best = float(row['Precision@K']) == float(best_p.max())
-            cls = ' class="best-val"' if is_best else ''
-            html += f"""
-            <tr>
-              <td><strong>{row['Model']}</strong></td>
-              <td>@{int(row['K'])}</td>
-              <td{cls}>{float(row['Precision@K']):.4f}</td>
-              <td>{float(row['Recall@K']):.4f}</td>
-              <td>{float(row['NDCG@K']):.4f}</td>
-            </tr>"""
-        html += "</tbody></table>"
-        st.markdown(html, unsafe_allow_html=True)
+
+        # Mise en forme lisible
+        df_display = df.copy()
+        df_display['K'] = df_display['K'].apply(lambda x: f"@{int(x)}")
+        df_display['Precision@K'] = df_display['Precision@K'].apply(lambda x: f"{float(x)*100:.2f}%")
+        df_display['Recall@K']    = df_display['Recall@K'].apply(lambda x: f"{float(x)*100:.2f}%")
+        df_display['NDCG@K']      = df_display['NDCG@K'].apply(lambda x: f"{float(x)*100:.2f}%")
+        df_display.columns = ['Modèle', 'K', 'Précision', 'Rappel', 'NDCG']
+
+        st.dataframe(
+            df_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Modèle":    st.column_config.TextColumn("Modèle",    width="medium"),
+                "K":         st.column_config.TextColumn("K",         width="small"),
+                "Précision": st.column_config.TextColumn("Précision", width="medium"),
+                "Rappel":    st.column_config.TextColumn("Rappel",    width="medium"),
+                "NDCG":      st.column_config.TextColumn("NDCG",      width="medium"),
+            }
+        )
+        # Légende
+        st.caption("🏆 Meilleure valeur : LSTM Précision@5 = 30.61%")
     else:
         st.info("Lancez `python train_pipeline.py` pour générer les résultats.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
 # SECTION AMÉLIORATIONS
